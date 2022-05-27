@@ -65,13 +65,13 @@ def fetch_dataloader(args, mode):
     assert mode in ['train', 'valid', 'vis']
 
     transforms = T.Compose([
-#        T.Resize(args.resize) if args.resize else T.Lambda(lambda x: x),
-        #T.CenterCrop(320 if not args.resize else args.resize),
-#        lambda x: torch.from_numpy(np.array(x, copy=True)).float().div(255).unsqueeze(0),   # tensor in [0,1]
-#        T.Normalize(mean=[0.5330], std=[0.0349]),                                           # whiten with dataset mean and std
+        T.Resize(args.resize) if args.resize else T.Lambda(lambda x: x),
+        T.CenterCrop(320 if not args.resize else args.resize),
+        #lambda x: torch.from_numpy(np.array(x, copy=True)).float().div(255).unsqueeze(0),   # tensor in [0,1]
+        #T.Normalize(mean=[0.5330], std=[0.0349]),                                           # whiten with dataset mean and std
         #lambda x: x.expand(3,-1,-1)
-        T.Resize((args.resize, args.resize)),
-        T.RandomHorizontalFlip(),
+#        T.Resize((args.resize, args.resize)),
+#        T.RandomHorizontalFlip(),
         T.ToTensor(),
         ])                                                       # expand to 3 channels
 
@@ -243,6 +243,11 @@ def train_and_evaluate(model, train_dataloader, valid_dataloader, loss_fn, optim
     for epoch in range(args.n_epochs):
         # train
         train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, epoch, args)
+        print('Training info...', end='\r')
+        #train_metrics = evaluate_single_model(model, train_dataloader, loss_fn, args)
+        #print('Evaluate metrics @ step {}:'.format(args.step))
+        #print('AUC:\n', pprint.pformat(train_metrics['aucs']))
+        #print('Loss:\n', pprint.pformat(train_metrics['loss']))
 
         # evaluate
         print('Evaluating...', end='\r')
@@ -477,10 +482,11 @@ if __name__ == '__main__':
 #        optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, nesterov=True)
 #        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [40000, 60000])
     elif args.model=='vit':
-        model = vit_model = ViT(image_size = 256, patch_size = 16, num_classes = len(ChexpertSmall.attr_names), dim = 128, depth = 4, heads = 8, channels = 1, mlp_dim = 3,).to(args.device)
+        model = vit_model = ViT(image_size = 256, patch_size = 16, num_classes = len(ChexpertSmall.attr_names), dim = 512, depth = 6, heads = 8, channels = 1, mlp_dim = 1024,).to(args.device)
         grad_cam_hooks = None
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.7)
+        scheduler = None
     elif args.model=='aadensenet121':
         model = DenseNet(32, (6, 12, 24, 16), 64, num_classes=n_classes,
                          attn_params={'k': 0.2, 'v': 0.1, 'nh': 8, 'relative': True, 'input_dims': (320,320)}).to(args.device)
