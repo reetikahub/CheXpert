@@ -30,7 +30,8 @@ from vit_pytorch import ViT
 parser = argparse.ArgumentParser()
 # action
 parser.add_argument('--load_config', type=str, help='Path to config.json file to load args from.')
-parser.add_argument('--train', action='store_true', help='Train model.')
+parser.add_argument('--train', help='Train model.')
+parser.add_argument('--train_mode', default='train', help='"train" or "train_debug". In debug mode, loads the validation data as training data')
 parser.add_argument('--evaluate_single_model', action='store_true', help='Evaluate a single model.')
 parser.add_argument('--evaluate_ensemble', action='store_true', help='Evaluate an ensemble (given a checkpoints tracker of saved model checkpoints).')
 parser.add_argument('--visualize', action='store_true', help='Visualize Grad-CAM.')
@@ -63,7 +64,7 @@ parser.add_argument('--eval_interval', type=int, default=300, help='Interval of 
 # --------------------
 
 def fetch_dataloader(args, mode):
-    assert mode in ['train', 'valid', 'vis']
+    assert mode in ['train', 'valid', 'vis', 'train_debug']
 
     transforms = T.Compose([
         T.Resize(args.resize) if args.resize else T.Lambda(lambda x: x),
@@ -542,7 +543,7 @@ if __name__ == '__main__':
         # load pretrained flag from config -- in case forgotten e.g. in post-training evaluation
         # (images still need to be normalized if training started on an imagenet pretrained model)
         args.pretrained = load_json(os.path.join(args.output_dir, 'config.json'))['pretrained']
-    train_dataloader = fetch_dataloader(args, mode='train')
+    train_dataloader = fetch_dataloader(args, mode=args.train_mode)
     valid_dataloader = fetch_dataloader(args, mode='valid')
     vis_dataloader = fetch_dataloader(args, mode='vis')
 
@@ -554,8 +555,8 @@ if __name__ == '__main__':
     print('Train data length: ', len(train_dataloader.dataset))
     print('Valid data length: ', len(valid_dataloader.dataset))
     print('Vis data subset: ', len(vis_dataloader.dataset))
-
     if args.train:
+        print(f'Initializing training.')
         train_and_evaluate(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, args)
 
     if args.evaluate_single_model:

@@ -28,8 +28,9 @@ class ChexpertSmall(Dataset):
     def __init__(self, root, mode='train', transform=None, data_filter=None, mini_data=None):
         self.root = os.path.expanduser(root)
         self.transform = transform
-        assert mode in ['train', 'valid', 'test', 'vis']
+        assert mode in ['train', 'valid', 'test', 'vis', 'train_debug']
         self.mode = mode
+        print(f"Creating dataset with mode {mode}")
 
         # if mode is test; root is path to csv file (in test mode), construct dataset from this csv;
         # if mode is train/valid; root is path to data folder with `train`/`valid` csv file to construct dataset.
@@ -41,7 +42,8 @@ class ChexpertSmall(Dataset):
 #            self._maybe_download_and_extract()
             self._maybe_process(data_filter)
 
-            data_file = os.path.join(self.root, self.dir_name, 'valid.pt' if mode in ['valid', 'vis'] else 'train.pt')
+            data_file = os.path.join(self.root, self.dir_name,
+              'valid.pt' if mode in ['valid', 'vis', 'train_debug'] else 'train.pt')
             self.data = torch.load(data_file)
 
             if mini_data is not None:
@@ -126,8 +128,10 @@ class ChexpertSmall(Dataset):
         valid_file = os.path.join(self.root, self.dir_name, 'valid.pt')
         if not (os.path.exists(train_file) and os.path.exists(valid_file)):
             # load data and preprocess training data
-            valid_df = pd.read_csv(os.path.join(self.root, self.dir_name, 'valid.csv'), keep_default_na=True)
-            train_df = self._load_and_preprocess_training_data(os.path.join(self.root, self.dir_name, 'train.csv'), data_filter)
+            valid_df = pd.read_csv(os.path.join(
+              self.root, self.dir_name, 'valid.csv'), keep_default_na=True)
+            train_df = self._load_and_preprocess_training_data(
+              os.path.join(self.root, self.dir_name, 'train.csv'), data_filter)
 
             # save
             torch.save(train_df, train_file)
