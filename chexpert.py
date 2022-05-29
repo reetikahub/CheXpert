@@ -15,6 +15,7 @@ from tensorboardX import SummaryWriter
 
 import ast
 import os
+import csv
 import pprint
 import argparse
 import datetime
@@ -65,11 +66,14 @@ parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate.')
 parser.add_argument('--lr_warmup_steps', type=float, default=0, help='Linear warmup of the learning rate for lr_warmup_steps number of steps.')
 parser.add_argument('--lr_decay_factor', type=float, default=0.97, help='Decay factor if exponential learning rate decay scheduler.')
 parser.add_argument('--step', type=int, default=0, help='Current step of training (number of minibatches processed).')
-parser.add_argument('--log_interval', type=int, default=50, help='Interval of num batches to show loss statistics.')
-parser.add_argument('--eval_interval', type=int, default=300, help='Interval of num batches to evaluate, checkpoint and save samples.')
-parser.add_argument('--num_workers', type=int, default=16, help='Number of workers for the data loader. Ignored in validation mode')
+# parser.add_argument('--num_workers', type=int, default=16, help='Number of workers for the data loader. Ignored in validation mode')
+
+parser.add_argument('--log_interval', type=int, default=50, help='Interval of num batches to write loss to tensorboardX.')
+parser.add_argument('--eval_interval', type=int, default=300, help='Interval of num batches to evaluate on validation set. Must be divisible by `checkpoint_save_interval`')
+parser.add_argument('--checkpoint_save_interval', type=int, default=300, help='Interval of num batches to save checkpoints.')
 
 PST = pytz.timezone('America/Los_Angeles')
+CSV_COLUMNS = ['epoch', 'step', 'train_loss', 'eval_auc_0', 'eval_auc_1', 'eval_auc_2', 'eval_auc_3', 'eval_auc_4']
 # --------------------
 # Data IO
 # --------------------
@@ -167,10 +171,11 @@ def compute_metrics(outputs, targets, losses):
 # Train and evaluate
 # --------------------
 
-def train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, epoch, args):
+def train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer,
+  scheduler, writer, epoch, args, csv_path):
     model.train()
 
-    with tqdm(total=len(train_dataloader), desc='Step at start {}; Training epoch {}/{}'.format(args.step, epoch+1, args.n_epochs)) as pbar:
+    with tqdm(total=len(train_dataloader), desc='Step at start {}; Training epoch {}/{}\n'.format(args.step, epoch+1, args.n_epochs)) as pbar:
         for x, target, idxs in train_dataloader:
             args.step += 1
 
@@ -196,19 +201,25 @@ def train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer, s
                     model.eval()
 
                     eval_metrics = evaluate_single_model(model, valid_dataloader, loss_fn, args)
-
+                    eval_csv_row = {'epoch': epoch, 'step': args.step, 'train_loss': loss.item()}
                     writer.add_scalar('eval_loss', np.sum(list(eval_metrics['loss'].values())), args.step)
                     for k, v in eval_metrics['aucs'].items():
+                        eval_csv_row[f'eval_auc_{k}'] = v
                         writer.add_scalar('eval_auc_class_{}'.format(k), v, args.step)
 
-                    # save model
-                    save_checkpoint(checkpoint={'global_step': args.step,
-                                                'eval_loss': np.sum(list(eval_metrics['loss'].values())),
-                                                'avg_auc': np.nanmean(list(eval_metrics['aucs'].values())),
-                                                'state_dict': model.state_dict()},
-                                    optim_checkpoint=optimizer.state_dict(),
-                                    sched_checkpoint=scheduler.state_dict() if scheduler else None,
-                                    args=args)
+                    with open(csv_path, 'a') as f:
+                      csv.DictWriter(f, delimiter=',', fieldnames=CSV_COLUMNS).writerow(eval_csv_row)
+
+                    if args.step % args.checkpoint_save_interval == 0:
+                      # save model
+                      save_checkpoint(checkpoint={'global_step': args.step,
+                                                  'eval_loss': np.sum(list(eval_metrics['loss'].values())),
+                                                  'avg_auc': np.nanmean(list(eval_metrics['aucs'].values())),
+                                                  'state_dict': model.state_dict()},
+                                      optim_checkpoint=optimizer.state_dict(),
+                                      sched_checkpoint=scheduler.state_dict() if scheduler else None,
+                                      args=args)
+                   
 
                     # switch back to train mode
                     model.train()
@@ -253,10 +264,10 @@ def evaluate_ensemble(model, dataloader, loss_fn, args):
 
     return compute_metrics(outputs, targets, losses)
 
-def train_and_evaluate(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, args):
+def train_and_evaluate(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, args, csv_file):
     for epoch in range(args.n_epochs):
         # train
-        train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, epoch, args)
+        train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, epoch, args, csv_file)
         print('Training info...', end='\r')
         #train_metrics = evaluate_single_model(model, train_dataloader, loss_fn, args)
         #print('Evaluate metrics @ step {}:'.format(args.step))
@@ -455,6 +466,9 @@ def plot_roc(metrics, args, filename, labels=ChexpertSmall.attr_names):
 
 if __name__ == '__main__':
     args = parser.parse_args()
+    if not args.checkpoint_save_interval % args.eval_interval == 0:
+      raise ValueError(f'checkpoint_save_interval must be divisible by eval_interval')
+
     current_time = datetime.datetime.now(PST).strftime('%m-%d_%H-%M-%S')
     print(f'Current time is {current_time}')
 
@@ -476,7 +490,6 @@ if __name__ == '__main__':
     writer.add_text('config', str(args.__dict__))
 
     args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-#    args.device = torch.device('cuda:{}'.format(args.cuda) if args.cuda is not None and torch.cuda.is_available() else 'cpu')
 
     if args.seed:
         torch.manual_seed(args.seed)
@@ -583,7 +596,12 @@ if __name__ == '__main__':
     print('Vis data subset: ', len(vis_dataloader.dataset))
     if args.train:
         print(f'Initializing training with model {args.model}.')
-        train_and_evaluate(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, args)
+        csv_path = os.path.join(args.output_dir, 'train_history.csv')
+        with open(csv_path, 'w') as f:
+          csv_writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+          csv_writer.writeheader()
+          # csv_writer.writerow(','.join(csv_columns))
+        train_and_evaluate(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, args, csv_path)
 
     if args.evaluate_single_model:
         eval_metrics = evaluate_single_model(model, valid_dataloader, loss_fn, args)
