@@ -15,7 +15,8 @@ from tensorboardX import SummaryWriter
 import os
 import pprint
 import argparse
-import time
+import datetime
+import pytz
 import json
 import timm
 from functools import partial
@@ -56,9 +57,9 @@ parser.add_argument('--lr_warmup_steps', type=float, default=0, help='Linear war
 parser.add_argument('--lr_decay_factor', type=float, default=0.97, help='Decay factor if exponential learning rate decay scheduler.')
 parser.add_argument('--step', type=int, default=0, help='Current step of training (number of minibatches processed).')
 parser.add_argument('--log_interval', type=int, default=50, help='Interval of num batches to show loss statistics.')
-parser.add_argument('--eval_interval', type=int, default=300, help='Interval of num epochs to evaluate, checkpoint, and save samples.')
+parser.add_argument('--eval_interval', type=int, default=300, help='Interval of num batches to evaluate, checkpoint and save samples.')
 
-
+PST = pytz.timezone('America/Los_Angeles')
 # --------------------
 # Data IO
 # --------------------
@@ -68,13 +69,13 @@ def fetch_dataloader(args, mode):
 
     transforms = T.Compose([
         T.Resize(args.resize) if args.resize else T.Lambda(lambda x: x),
-        T.CenterCrop(320 if not args.resize else args.resize),
+        T.CenterCrop(320 if not args.resize else args.resize), # change this??
         lambda x: torch.from_numpy(np.array(x, copy=True)).float().div(255).unsqueeze(0),   # tensor in [0,1]
         T.Normalize(mean=[0.5330], std=[0.0349]),                                           # whiten with dataset mean and std
         lambda x: x.expand(3,-1,-1)
 #        T.Resize((args.resize, args.resize)),
 #        T.RandomHorizontalFlip(),
-#        T.ToTensor(),
+      #  T.ToTensor(),
         ])                                                       # expand to 3 channels
 
     dataset = ChexpertSmall(args.data_path, mode, transforms, mini_data=args.mini_data)
@@ -96,6 +97,7 @@ def load_json(file_path):
 def save_checkpoint(checkpoint, optim_checkpoint, sched_checkpoint, args, max_records=10):
     """ save model and optimizer checkpoint along with csv tracker
     of last `max_records` best number of checkpoints as sorted by avg auc """
+    print(f'Saving checkpoint')
     # 1. save latest
     torch.save(checkpoint, os.path.join(args.output_dir, 'checkpoint_latest.pt'))
     torch.save(optim_checkpoint, os.path.join(args.output_dir, 'optim_checkpoint_latest.pt'))
@@ -443,6 +445,8 @@ def plot_roc(metrics, args, filename, labels=ChexpertSmall.attr_names):
 
 if __name__ == '__main__':
     args = parser.parse_args()
+    current_time = datetime.datetime.now(PST).strftime('%m-%d_%H-%M-%S')
+    print(f'Current time is {current_time}')
 
     # overwrite args from config
     if args.load_config: args.__dict__.update(load_json(args.load_config))
@@ -450,7 +454,7 @@ if __name__ == '__main__':
     # set up output folder
     if not args.output_dir:
         if args.restore: raise RuntimeError('Must specify `output_dir` argument')
-        args.output_dir: args.output_dir = os.path.join('results', time.strftime('%Y-%m-%d_%H-%M-%S', time.gmtime()))
+        args.output_dir: args.output_dir = os.path.join('results', current_time)
     # make new folders if they don't exist
     writer = SummaryWriter(logdir=args.output_dir)  # creates output_dir
     if not os.path.exists(os.path.join(args.output_dir, 'vis')): os.makedirs(os.path.join(args.output_dir, 'vis'))
@@ -487,7 +491,16 @@ if __name__ == '__main__':
         if(args.pretrained):
             model = timm.create_model('vit_base_patch16_224', pretrained=True, num_classes=n_classes).to(args.device)
         else:
-            model = vit_model = ViT(image_size = 256, patch_size = 16, num_classes = len(ChexpertSmall.attr_names), dim = 512, depth = 6, heads = 8, channels = 1, mlp_dim = 1024,dropout=0.2).to(args.device)
+            model = vit_model = ViT(
+              image_size = args.resize,
+              patch_size = 16,
+              num_classes = len(ChexpertSmall.attr_names),
+              dim = 512,
+              depth = 6,
+              heads = 8,
+              channels = 3,
+              mlp_dim = 1024,
+              dropout=0.2).to(args.device)
         grad_cam_hooks = None
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.7)
@@ -556,7 +569,7 @@ if __name__ == '__main__':
     print('Valid data length: ', len(valid_dataloader.dataset))
     print('Vis data subset: ', len(vis_dataloader.dataset))
     if args.train:
-        print(f'Initializing training.')
+        print(f'Initializing training with model {args.model}.')
         train_and_evaluate(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, args)
 
     if args.evaluate_single_model:

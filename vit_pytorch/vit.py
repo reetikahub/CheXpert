@@ -90,7 +90,6 @@ class ViT(nn.Module):
         num_patches = (image_height // patch_height) * (image_width // patch_width)
         patch_dim = channels * patch_height * patch_width
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
-        #print(patch_dim, dim)
         self.to_patch_embedding = nn.Sequential(
             Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_height, p2 = patch_width),
             nn.Linear(patch_dim, dim),
@@ -111,7 +110,6 @@ class ViT(nn.Module):
         )
 
     def forward(self, img):
-        #print(img.shape)
         x = self.to_patch_embedding(img)
         b, n, _ = x.shape
 
