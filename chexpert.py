@@ -1,3 +1,4 @@
+from re import X
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,6 +13,7 @@ from sklearn.metrics import roc_curve, auc, precision_recall_curve
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
 
+import ast
 import os
 import pprint
 import argparse
@@ -19,6 +21,7 @@ import datetime
 import pytz
 import json
 import timm
+import sys
 from functools import partial
 
 # dataset and models
@@ -28,10 +31,13 @@ from torchvision.models import densenet121, resnet152
 #from models.attn_aug_conv import DenseNet, ResNet, Bottleneck
 from vit_pytorch import ViT
 
+def parse_type(x):
+  return ast.literal_eval(x)
+
 parser = argparse.ArgumentParser()
 # action
 parser.add_argument('--load_config', type=str, help='Path to config.json file to load args from.')
-parser.add_argument('--train', help='Train model.')
+parser.add_argument('--train', type=parse_type, help='Train model.')
 parser.add_argument('--train_mode', default='train', help='"train" or "train_debug". In debug mode, loads the validation data as training data')
 parser.add_argument('--evaluate_single_model', action='store_true', help='Evaluate a single model.')
 parser.add_argument('--evaluate_ensemble', action='store_true', help='Evaluate an ensemble (given a checkpoints tracker of saved model checkpoints).')
@@ -48,9 +54,12 @@ parser.add_argument('--model', default='densenet121', help='What model architect
 # data params
 parser.add_argument('--mini_data', type=int, help='Truncate dataset to this number of examples.')
 parser.add_argument('--resize', type=int, help='Size of minimum edge to which to resize images.')
+
+parser.add_argument('--shuffle', type=parse_type, help='Whether to shuffle the data.')
 # training params
 parser.add_argument('--pretrained', action='store_true', help='Use ImageNet pretrained model and normalize data mean and std.')
-parser.add_argument('--batch_size', type=int, default=16, help='Dataloaders batch size.')
+parser.add_argument('--train_batch_size', type=int, default=16, help='Train batch size.')
+parser.add_argument('--eval_batch_size', type=int, default=32, help='Can usually be at least double train batch size.')
 parser.add_argument('--n_epochs', type=int, default=1, help='Number of epochs to train.')
 parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate.')
 parser.add_argument('--lr_warmup_steps', type=float, default=0, help='Linear warmup of the learning rate for lr_warmup_steps number of steps.')
@@ -58,15 +67,16 @@ parser.add_argument('--lr_decay_factor', type=float, default=0.97, help='Decay f
 parser.add_argument('--step', type=int, default=0, help='Current step of training (number of minibatches processed).')
 parser.add_argument('--log_interval', type=int, default=50, help='Interval of num batches to show loss statistics.')
 parser.add_argument('--eval_interval', type=int, default=300, help='Interval of num batches to evaluate, checkpoint and save samples.')
+parser.add_argument('--num_workers', type=int, default=16, help='Number of workers for the data loader. Ignored in validation mode')
 
 PST = pytz.timezone('America/Los_Angeles')
 # --------------------
 # Data IO
 # --------------------
 
-def fetch_dataloader(args, mode):
+def fetch_dataloader(args, mode, batch_size):
     assert mode in ['train', 'valid', 'vis', 'train_debug']
-
+  
     transforms = T.Compose([
         T.Resize(args.resize) if args.resize else T.Lambda(lambda x: x),
         T.CenterCrop(320 if not args.resize else args.resize), # change this??
@@ -80,7 +90,7 @@ def fetch_dataloader(args, mode):
 
     dataset = ChexpertSmall(args.data_path, mode, transforms, mini_data=args.mini_data)
 
-    return DataLoader(dataset, args.batch_size, shuffle=(mode=='train'), pin_memory=(args.device.type=='cuda'),
+    return DataLoader(dataset, batch_size, shuffle=args.shuffle, pin_memory=(args.device.type=='cuda'),
                       num_workers=0 if mode=='valid' else 16)  # since evaluating the valid_dataloader is called inside the
                                                               # train_dataloader loop, 0 workers for valid_dataloader avoids
                                                               # forking (cf torch dataloader docs); else memory sharing gets clunky
@@ -556,9 +566,12 @@ if __name__ == '__main__':
         # load pretrained flag from config -- in case forgotten e.g. in post-training evaluation
         # (images still need to be normalized if training started on an imagenet pretrained model)
         args.pretrained = load_json(os.path.join(args.output_dir, 'config.json'))['pretrained']
-    train_dataloader = fetch_dataloader(args, mode=args.train_mode)
-    valid_dataloader = fetch_dataloader(args, mode='valid')
-    vis_dataloader = fetch_dataloader(args, mode='vis')
+    train_dataloader = fetch_dataloader(
+      args, mode=args.train_mode, batch_size=args.train_batch_size)
+    valid_dataloader = fetch_dataloader(
+      args, mode='valid', batch_size=args.eval_batch_size)
+    vis_dataloader = fetch_dataloader(
+      args, mode='vis', batch_size=args.eval_batch_size)
 
     # setup loss function for train and eval
     loss_fn = nn.BCEWithLogitsLoss(reduction='none').to(args.device)

@@ -4,6 +4,7 @@ from urllib import request
 import zipfile
 import json
 import math
+import random
 
 import pandas as pd
 import numpy as np
@@ -13,6 +14,7 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset
 
+random.seed(1216)
 
 class ChexpertSmall(Dataset):
     url = 'http://download.cs.stanford.edu/deep/CheXpert-v1.0-small.zip'
@@ -30,7 +32,13 @@ class ChexpertSmall(Dataset):
         self.transform = transform
         assert mode in ['train', 'valid', 'test', 'vis', 'train_debug']
         self.mode = mode
-        print(f"Creating dataset with mode {mode}")
+        
+        missing_images_path = os.path.join(self.root, f'{mode}_missing_images.csv')
+        with open(missing_images_path, 'w') as f:
+          f.write('Start\n')
+          print(f"Created missing images file {missing_images_path}")
+        self.missing_images_path = missing_images_path
+        print(f"Creating dataset with mode {mode}.")
 
         # if mode is test; root is path to csv file (in test mode), construct dataset from this csv;
         # if mode is train/valid; root is path to data folder with `train`/`valid` csv file to construct dataset.
@@ -72,11 +80,30 @@ class ChexpertSmall(Dataset):
 
         # store index of the selected attributes in the columns of the data for faster indexing
         self.attr_idxs = [self.data.columns.tolist().index(a) for a in self.attr_names]
+        print(f'!! Dataset has {len(self.data)} examples')    
 
     def __getitem__(self, idx):
         # 1. select and load image
-        img_path = self.data.iloc[idx, 0]  # 'Path' column is 0
-        img = Image.open(os.path.join(self.root, img_path))
+        img_path = os.path.join(self.root, self.data.iloc[idx, 0])  # 'Path' column is 0
+        if not os.path.isfile(img_path):
+          with open(self.missing_images_path, 'a') as f:
+              f.write(f'{img_path}, {idx}\n')
+          print(f'++++Image {img_path} DNE. Index {idx}')
+          while(True):
+            new_idx = random.randint(0, len(self.data))
+            temp_img_path = os.path.join(self.root, self.data.iloc[new_idx, 0])
+            if os.path.exists(temp_img_path):
+              print(f'Updating idx {idx} to random idx {new_idx}')
+              img_path = temp_img_path
+              break
+            with open(self.missing_images_path, 'a') as f:
+              f.write(f'{img_path}, {new_idx}\n')
+            print(f'++++Image {img_path} DNE. Index {new_idx}')
+        try:
+          img = Image.open(img_path)
+        except:
+          print(f'~~~~~~~~Image exists, but unable to read at index {idx}, {img_path}')
+          raise ValueError('Image {img_path} DNE. Index {idx}')
         if self.transform is not None:
             img = self.transform(img)
 
