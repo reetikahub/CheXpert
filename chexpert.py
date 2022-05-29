@@ -600,7 +600,6 @@ if __name__ == '__main__':
         with open(csv_path, 'w') as f:
           csv_writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
           csv_writer.writeheader()
-          # csv_writer.writerow(','.join(csv_columns))
         train_and_evaluate(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, args, csv_path)
 
     if args.evaluate_single_model:
