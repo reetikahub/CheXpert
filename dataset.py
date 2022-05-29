@@ -51,7 +51,7 @@ class ChexpertSmall(Dataset):
             self._maybe_process(data_filter)
 
             data_file = os.path.join(self.root, self.dir_name,
-              'valid.pt' if mode in ['valid', 'vis', 'train_debug'] else 'train.pt')
+              'valid.pt' if mode in ['valid', 'vis', 'train_debug'] else 'train_ours.pt')
             self.data = torch.load(data_file)
 
             if mini_data is not None:
@@ -151,18 +151,19 @@ class ChexpertSmall(Dataset):
 
         # check for processed .pt files
         print(os.path.join(self.root, self.dir_name, 'valid.csv'))
-        train_file = os.path.join(self.root, self.dir_name, 'train.pt')
+        train_file = os.path.join(self.root, self.dir_name, 'train_ours.pt')
         valid_file = os.path.join(self.root, self.dir_name, 'valid.pt')
-        if not (os.path.exists(train_file) and os.path.exists(valid_file)):
-            # load data and preprocess training data
-            valid_df = pd.read_csv(os.path.join(
-              self.root, self.dir_name, 'valid.csv'), keep_default_na=True)
-            train_df = self._load_and_preprocess_training_data(
-              os.path.join(self.root, self.dir_name, 'train.csv'), data_filter)
+        # if not (os.path.exists(train_file) and os.path.exists(valid_file)):
+        # load data and preprocess training data
+        valid_df = pd.read_csv(os.path.join(
+          self.root, self.dir_name, 'valid.csv'), keep_default_na=True)
+        train_df = self._load_and_preprocess_training_data(
+          os.path.join(self.root, self.dir_name, 'train_ours.csv'), data_filter)
 
-            # save
-            torch.save(train_df, train_file)
-            torch.save(valid_df, valid_file)
+        # save
+        print(f'Writing train file {train_file}')
+        torch.save(train_df, train_file)
+        torch.save(valid_df, valid_file)
 
     def _load_and_preprocess_training_data(self, csv_path, data_filter):
         train_df = pd.read_csv(csv_path, keep_default_na=True)

@@ -512,7 +512,8 @@ if __name__ == '__main__':
 #        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [40000, 60000])
     elif args.model=='vit':
         if(args.pretrained):
-            model = timm.create_model('vit_base_patch16_224', pretrained=True, num_classes=n_classes).to(args.device)
+            # model = timm.create_model('vit_base_patch16_224', pretrained=True, num_classes=n_classes).to(args.device)
+            model = timm.create_model('vit_base_patch32_224_sam', pretrained=True, num_classes=n_classes).to(args.device)
         else:
             model = vit_model = ViT(
               image_size = args.resize,
@@ -587,6 +588,9 @@ if __name__ == '__main__':
       args, mode='vis', batch_size=args.eval_batch_size)
 
     # setup loss function for train and eval
+    weights = torch.ones((args.train_batch_size, 5))
+    # weights[:, [0, 1]] = 2
+    # , weight=weights
     loss_fn = nn.BCEWithLogitsLoss(reduction='none').to(args.device)
 
     print('Loaded {} (number of parameters: {:,}; weights trained to step {})'.format(
@@ -596,7 +600,7 @@ if __name__ == '__main__':
     print('Vis data subset: ', len(vis_dataloader.dataset))
     if args.train:
         print(f'Initializing training with model {args.model}.')
-        csv_path = os.path.join(args.output_dir, 'train_history.csv')
+        csv_path = os.path.join(args.output_dir, f'train_history_{current_time}.csv')
         with open(csv_path, 'w') as f:
           csv_writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
           csv_writer.writeheader()
