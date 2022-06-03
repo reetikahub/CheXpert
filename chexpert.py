@@ -7,13 +7,18 @@ from torch.utils.data import DataLoader, TensorDataset
 
 import numpy as np
 import matplotlib
+from torchvision.transforms.transforms import RandomHorizontalFlip
+from torchvision.utils import flow_to_image
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, auc, precision_recall_curve
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
+import dataset
+import math
 
 import ast
+import dataclasses
 import os
 import csv
 import pprint
@@ -24,6 +29,8 @@ import json
 import timm
 import sys
 from functools import partial
+from typing import Text
+from enum import Enum
 
 # dataset and models
 from dataset import ChexpertSmall, extract_patient_ids
@@ -66,36 +73,89 @@ parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate.')
 parser.add_argument('--lr_warmup_steps', type=float, default=0, help='Linear warmup of the learning rate for lr_warmup_steps number of steps.')
 parser.add_argument('--lr_decay_factor', type=float, default=0.97, help='Decay factor if exponential learning rate decay scheduler.')
 parser.add_argument('--step', type=int, default=0, help='Current step of training (number of minibatches processed).')
-# parser.add_argument('--num_workers', type=int, default=16, help='Number of workers for the data loader. Ignored in validation mode')
+parser.add_argument('--num_workers', type=int, default=16, help='Number of workers for the data loader. Ignored in validation mode')
+parser.add_argument('--expanded_transforms', type=parse_type, help='Whether to do aggressive data augmentation')
+parser.add_argument('--proj_drop_rate', default=0., type=float, help='Dropout rate for the linear layers in VIT')
+parser.add_argument('--attn_drop_rate', default=0., type=float, help='Dropout rate for the linear layers in VIT')
+parser.add_argument('--three_class', type=parse_type, help='If true, treats labels as 3 class instead of 2.')
+parser.add_argument('--descr', help='Experiment description')
+
+
+# class TimmModel(Enum):
+#   dino16 = 'vit_base_patch16_224_dino'
+#   google16 = 'vit_base_patch16_224_in21k'
+#   original16 = 'vit_base_patch16_224'
+#   google32 = 'vit_base_patch32_224_in21k'
+#   sam32 = 'vit_base_patch32_224_sam'
+
+#   def __str__(self):
+#     return self.value
+
+parser.add_argument('--timm_pretrain_model')
 
 parser.add_argument('--log_interval', type=int, default=50, help='Interval of num batches to write loss to tensorboardX.')
 parser.add_argument('--eval_interval', type=int, default=300, help='Interval of num batches to evaluate on validation set. Must be divisible by `checkpoint_save_interval`')
 parser.add_argument('--checkpoint_save_interval', type=int, default=300, help='Interval of num batches to save checkpoints.')
 
+
 PST = pytz.timezone('America/Los_Angeles')
-CSV_COLUMNS = ['epoch', 'step', 'train_loss', 'eval_auc_0', 'eval_auc_1', 'eval_auc_2', 'eval_auc_3', 'eval_auc_4']
+
+CSV_COLUMNS = ['epoch', 'step', 'train_loss',
+                'eval_auc_0: Atelectasis', 'eval_auc_1: Cardiomegaly',
+                'eval_auc_2: Consolidation', 'eval_auc_3: Edema', 'eval_auc_4: Pleural Effusion']
 # --------------------
 # Data IO
 # --------------------
 
 def fetch_dataloader(args, mode, batch_size):
     assert mode in ['train', 'valid', 'vis', 'train_debug']
-  
-    transforms = T.Compose([
-        T.Resize(args.resize) if args.resize else T.Lambda(lambda x: x),
-        T.CenterCrop(320 if not args.resize else args.resize), # change this??
-        lambda x: torch.from_numpy(np.array(x, copy=True)).float().div(255).unsqueeze(0),   # tensor in [0,1]
-        T.Normalize(mean=[0.5330], std=[0.0349]),                                           # whiten with dataset mean and std
-        lambda x: x.expand(3,-1,-1)
-#        T.Resize((args.resize, args.resize)),
-#        T.RandomHorizontalFlip(),
-      #  T.ToTensor(),
-        ])                                                       # expand to 3 channels
+    if args.expanded_transforms:
+      transforms = T.Compose([
+          T.Resize(args.resize) if args.resize else T.Lambda(lambda x: x),
+          T.CenterCrop(320 if not args.resize else args.resize), # change this??
+          lambda x: torch.from_numpy(np.array(x, copy=True)).float().div(255).unsqueeze(0),   # tensor in [0,1]
+                                                  # whiten with dataset mean and std
+          T.RandomHorizontalFlip(0.1),
+          T.RandomApply(torch.nn.ModuleList([
+            # T.RandAugment(),
+            T.RandomRotation(5),
+            T.RandomAffine(
+              degrees=10,
+              translate=(0.05, 0.05), 
+              scale=(0.8, 1.2)),
+            ]),     
+          p=0.3),
+          T.Normalize(mean=[0.5330], std=[0.0349]),   
+          ])     
+    else:
+      transforms = T.Compose([
+          T.Resize(args.resize) if args.resize else T.Lambda(lambda x: x),
+          T.CenterCrop(320 if not args.resize else args.resize), # change this??
+          lambda x: torch.from_numpy(np.array(x, copy=True)).float().div(255).unsqueeze(0),   # tensor in [0,1]
+          T.Normalize(mean=[0.5330], std=[0.0349]),
+          T.RandomHorizontalFlip(0.2),
+          # T.RandomHorizontalFlip(0.1),
+          # T.RandomApply(torch.nn.ModuleList([
+            
+          #   # T.RandAugment(),
+          #   T.RandomRotation(5),
+          #   T.RandomAffine(
+          #     degrees=10,
+          #     translate=(0.05, 0.05), 
+          #     scale=(0.8, 1.2)),
+          #   ]),     
+          # p=0.3),
+          
+          # T.Resize((args.resize, args.resize)),
+          # lambda x: x.expand(3,-1,-1),
+          
+        #  T.ToTensor(),
+          ])                                                       # expand to 3 channels
 
-    dataset = ChexpertSmall(args.data_path, mode, transforms, mini_data=args.mini_data)
+    dataset = ChexpertSmall(args.data_path, mode, transforms, mini_data=args.mini_data, three_class=args.three_class)
 
     return DataLoader(dataset, batch_size, shuffle=args.shuffle, pin_memory=(args.device.type=='cuda'),
-                      num_workers=0 if mode=='valid' else 16)  # since evaluating the valid_dataloader is called inside the
+                      num_workers=0 if mode=='valid' else args.num_workers)  # since evaluating the valid_dataloader is called inside the
                                                               # train_dataloader loop, 0 workers for valid_dataloader avoids
                                                               # forking (cf torch dataloader docs); else memory sharing gets clunky
 
@@ -150,14 +210,43 @@ def save_checkpoint(checkpoint, optim_checkpoint, sched_checkpoint, args, max_re
 # --------------------
 
 def compute_metrics(outputs, targets, losses):
-    n_classes = outputs.shape[1]
+    # n_classes = outputs.shape[1]
     fpr, tpr, aucs, precision, recall = {}, {}, {}, {}, {}
-    for i in range(n_classes):
+    for i in range(5):
+
         fpr[i], tpr[i], _ = roc_curve(targets[:,i], outputs[:,i])
         aucs[i] = auc(fpr[i], tpr[i])
+        # print(f'sahari targets {targets.shape}, outputs {outputs.shape}')
+        # print(f'sahar {targets[0:5, i]}, outputs {outputs[0:5, i]}')
         precision[i], recall[i], _ = precision_recall_curve(targets[:,i], outputs[:,i])
         fpr[i], tpr[i], precision[i], recall[i] = fpr[i].tolist(), tpr[i].tolist(), precision[i].tolist(), recall[i].tolist()
 
+    metrics = {'fpr': fpr,
+               'tpr': tpr,
+               'aucs': aucs,
+               'precision': precision,
+               'recall': recall,
+               'loss': dict(enumerate(losses.mean(0).tolist()))}
+
+    return metrics
+
+def compute_metrics_three_class(outputs, targets, losses):
+    # n_classes = outputs.shape[1]
+    fpr, tpr, aucs, precision, recall = {}, {}, {}, {}, {}
+    outputs = outputs.reshape((234, 5, 3))
+    for i in range(5):
+        # reshape into batch_size, 5, 3
+        # then take class 1 always and evaluate rOC
+        label_output = outputs[:, i, 1]
+        binarized_targets = targets[:,i]==1
+
+        fpr[i], tpr[i], _ = roc_curve(binarized_targets, label_output)
+        aucs[i] = auc(fpr[i], tpr[i])
+        # print(f'sahari targets {targets.shape}, outputs {outputs.shape}')
+        # print(f'sahar {targets[0:10, i]}, outputs {outputs[0:10, i]}')
+        precision[i], recall[i], _ = precision_recall_curve(binarized_targets, label_output)
+        fpr[i], tpr[i], precision[i], recall[i] = fpr[i].tolist(), tpr[i].tolist(), precision[i].tolist(), recall[i].tolist()
+    # loss is broken here for 3 class
     metrics = {'fpr': fpr,
                'tpr': tpr,
                'aucs': aucs,
@@ -171,24 +260,62 @@ def compute_metrics(outputs, targets, losses):
 # Train and evaluate
 # --------------------
 
+def evaluate_three_class_loss(out, target, loss_fn, uncertain_class, args):
+  num_labels = 5
+  batch_size = target.shape[0]
+  u_one_indices = set([0, 3, 4])
+  loss = torch.zeros(batch_size, num_labels)
+  # print(f'custom loss. Batch {batch_size}, uncertain class {uncertain_class}')
+  # print(f'target shape {target.shape}, head {target[0:5, :]}')
+  out = out.reshape((batch_size, num_labels, 3))
+  for i in range(num_labels):
+    # if i in u_one_indices:
+      # out[:, i, uncertain_class] = -math.inf   
+    out[:, i, :] = torch.nn.functional.softmax(out[:, i, :])
+    # print(f'hi sahar {out.dtype}, target {target.dtype}, out {out.device}, target {target.device}')
+    loss[:, i] = loss_fn(out[:, i, :], target[:, i].type(torch.LongTensor).to(args.device))
+  return loss
+
+def evaluate_loss(out, target, loss_fn, uncertain_class, args):
+  if args.three_class:
+    loss = evaluate_three_class_loss(out, target.to(args.device), loss_fn, 2, args)
+  else:
+    loss = loss_fn(out, target.to(args.device))
+  return loss
+
+
 def train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer,
   scheduler, writer, epoch, args, csv_path):
     model.train()
 
+    # steps_for_grad = 4
+    # optimizer.zero_grad()
     with tqdm(total=len(train_dataloader), desc='Step at start {}; Training epoch {}/{}\n'.format(args.step, epoch+1, args.n_epochs)) as pbar:
         for x, target, idxs in train_dataloader:
-            args.step += 1
-
+            
+            
             out = model(x.to(args.device))
+            # loss = evaluate_loss(out, target.to(args.device), loss_fn, 2, args)
+            # loss = loss.sum(1).mean(0)
             loss = loss_fn(out, target.to(args.device)).sum(1).mean(0)
-
+            
+            # with torch.enable_grad():
             optimizer.zero_grad()
             loss.backward()
+            # if args.step % steps_for_grad == 0:
             optimizer.step()
+            # optimizer.zero_grad()
+            
+            # optimizer.step()
             if scheduler and args.step >= args.lr_warmup_steps: scheduler.step()
 
             pbar.set_postfix(loss = '{:.4f}'.format(loss.item()))
             pbar.update()
+
+            # norm = 0
+            # for param in model.parameters():
+            #   norm += torch.norm(param)
+            # print(f'norm of all params {norm}')
 
             # record
             if args.step % args.log_interval == 0:
@@ -204,7 +331,7 @@ def train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer,
                     eval_csv_row = {'epoch': epoch, 'step': args.step, 'train_loss': loss.item()}
                     writer.add_scalar('eval_loss', np.sum(list(eval_metrics['loss'].values())), args.step)
                     for k, v in eval_metrics['aucs'].items():
-                        eval_csv_row[f'eval_auc_{k}'] = v
+                        eval_csv_row[f'eval_auc_{k}: {dataset.LABEL_NAMES[k]}'] = v
                         writer.add_scalar('eval_auc_class_{}'.format(k), v, args.step)
 
                     with open(csv_path, 'a') as f:
@@ -223,6 +350,8 @@ def train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer,
 
                     # switch back to train mode
                     model.train()
+            args.step += 1
+    return loss
 
 @torch.no_grad()
 def evaluate(model, dataloader, loss_fn, args):
@@ -231,7 +360,7 @@ def evaluate(model, dataloader, loss_fn, args):
     targets, outputs, losses = [], [], []
     for x, target, idxs in dataloader:
         out = model(x.to(args.device))
-        loss = loss_fn(out, target.to(args.device))
+        loss = evaluate_loss(out, target, loss_fn, 2, args)
 
         outputs += [out.cpu()]
         targets += [target]
@@ -241,7 +370,11 @@ def evaluate(model, dataloader, loss_fn, args):
 
 def evaluate_single_model(model, dataloader, loss_fn, args):
     outputs, targets, losses = evaluate(model, dataloader, loss_fn, args)
-    return compute_metrics(outputs, targets, losses)
+    if args.three_class:
+      return compute_metrics_three_class(outputs, targets, losses)
+    else:
+      return compute_metrics(outputs, targets, losses)
+    # return compute_metrics(outputs, targets, losses)
 
 def evaluate_ensemble(model, dataloader, loss_fn, args):
     checkpoints = [c for c in os.listdir(args.restore) \
@@ -264,10 +397,20 @@ def evaluate_ensemble(model, dataloader, loss_fn, args):
 
     return compute_metrics(outputs, targets, losses)
 
+@dataclasses.dataclass
+class StepResult:
+  step: int
+  train_loss: float
+  auc_0: float
+  auc_1: float
+  auc_2: float
+  auc_3: float
+  auc_4: float
+
 def train_and_evaluate(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, args, csv_file):
     for epoch in range(args.n_epochs):
         # train
-        train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, epoch, args, csv_file)
+        train_loss = train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, epoch, args, csv_file)
         print('Training info...', end='\r')
         #train_metrics = evaluate_single_model(model, train_dataloader, loss_fn, args)
         #print('Evaluate metrics @ step {}:'.format(args.step))
@@ -286,6 +429,8 @@ def train_and_evaluate(model, train_dataloader, valid_dataloader, loss_fn, optim
 
         # save eval metrics
         save_json(eval_metrics, 'eval_results_step_{}'.format(args.step), args)
+    final_auc0, final_auc1, final_auc2, final_auc3, final_auc4 = [v for k, v in eval_metrics['aucs'].items()]
+    return StepResult(args.step, train_loss.item(), final_auc0, final_auc1, final_auc2, final_auc3, final_auc4)
 
 # --------------------
 # Visualization
@@ -464,8 +609,18 @@ def plot_roc(metrics, args, filename, labels=ChexpertSmall.attr_names):
 # Main
 # --------------------
 
+EXPERIMENT_LOG_BASE = 'experiment_log.csv'
+EXPERIMENT_LOG_COLS = ['exp_dir', 'description', 'final_train_loss',
+  'final_auc_0', 'final_auc_1', 'final_auc_2', 'final_auc_3', 'final_auc_4']
+
 if __name__ == '__main__':
     args = parser.parse_args()
+
+    experiment_log_file = os.path.join(args.data_path, EXPERIMENT_LOG_BASE)
+    if not os.path.isfile(experiment_log_file):
+      with open(experiment_log_file, 'w') as f:
+        csv.DictWriter(f, fieldnames=EXPERIMENT_LOG_COLS).writeheader()
+    torch.manual_seed(1216)
     if not args.checkpoint_save_interval % args.eval_interval == 0:
       raise ValueError(f'checkpoint_save_interval must be divisible by eval_interval')
 
@@ -497,6 +652,8 @@ if __name__ == '__main__':
 
     # load model
     n_classes = len(ChexpertSmall.attr_names)
+    if args.three_class:
+      n_classes *= 3
     if args.model=='densenet121':
         model = densenet121(pretrained=args.pretrained).to(args.device)
         # 1. replace output layer with chexpert number of classes (pretrained loads ImageNet n_classes)
@@ -506,14 +663,23 @@ if __name__ == '__main__':
         # 3. store locations of forward and backward hooks for grad-cam
         grad_cam_hooks = {'forward': model.features.norm5, 'backward': model.classifier}
         # 4. init optimizer and scheduler
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+        optimizer = torch.optim.Adam(model.parameters(), weight_decay=1e-7, lr=args.lr)
         scheduler = None
 #        optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, nesterov=True)
 #        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [40000, 60000])
     elif args.model=='vit':
         if(args.pretrained):
-            # model = timm.create_model('vit_base_patch16_224', pretrained=True, num_classes=n_classes).to(args.device)
-            model = timm.create_model('vit_base_patch32_224_sam', pretrained=True, num_classes=n_classes).to(args.device)
+            print(f'TIMM {args.timm_pretrain_model}')
+            model = timm.create_model(
+              'vit_base_patch16_224_dino',
+              # args.timm_pretrain_model,
+              pretrained=True,
+              drop_rate=args.proj_drop_rate,
+              attn_drop_rate=args.attn_drop_rate,
+              num_classes=n_classes,
+              in_chans=1).to(args.device)
+            # model = timm.create_model('vit_base_patch16_224', pretrained=True, drop_rate=0.1, num_classes=n_classes, in_chans=1).to(args.device)
+            # model = timm.create_model('vit_base_patch32_224_sam', pretrained=True, num_classes=n_classes).to(args.device)
         else:
             model = vit_model = ViT(
               image_size = args.resize,
@@ -528,7 +694,7 @@ if __name__ == '__main__':
         grad_cam_hooks = None
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.7)
-        scheduler = None
+        # scheduler = None
     elif args.model=='aadensenet121':
         model = DenseNet(32, (6, 12, 24, 16), 64, num_classes=n_classes,
                          attn_params={'k': 0.2, 'v': 0.1, 'nh': 8, 'relative': True, 'input_dims': (320,320)}).to(args.device)
@@ -570,10 +736,10 @@ if __name__ == '__main__':
             print('Restoring optimizer.')
             optim_checkpoint_path = os.path.join(os.path.dirname(args.restore), 'optim_' + os.path.basename(args.restore))
             optimizer.load_state_dict(torch.load(optim_checkpoint_path, map_location=args.device))
-            if scheduler:
-                print('Restoring scheduler.')
-                sched_checkpoint_path = os.path.join(os.path.dirname(args.restore), 'sched_' + os.path.basename(args.restore))
-                scheduler.load_state_dict(torch.load(sched_checkpoint_path, map_location=args.device))
+            # if scheduler:
+            #     print('Restoring scheduler.')
+            #     sched_checkpoint_path = os.path.join(os.path.dirname(args.restore), 'sched_' + os.path.basename(args.restore))
+            #     scheduler.load_state_dict(torch.load(sched_checkpoint_path, map_location=args.device))
 
     # load data
     if args.restore:
@@ -588,10 +754,16 @@ if __name__ == '__main__':
       args, mode='vis', batch_size=args.eval_batch_size)
 
     # setup loss function for train and eval
-    weights = torch.ones((args.train_batch_size, 5))
+    # weights = torch.ones((args.train_batch_size, 5))
     # weights[:, [0, 1]] = 2
     # , weight=weights
-    loss_fn = nn.BCEWithLogitsLoss(reduction='none').to(args.device)
+    pos_weight = torch.tensor([1.25, 1.3, 1., 1., 1.])
+
+    if args.three_class:
+      loss_fn = torch.nn.CrossEntropyLoss(reduction='none')
+    else:
+      loss_fn = nn.BCEWithLogitsLoss(reduction='none').to(args.device)
+    # loss_fn = nn.CrossEntropyLoss(reduction='none').to(args.device)
 
     print('Loaded {} (number of parameters: {:,}; weights trained to step {})'.format(
         model._get_name(), sum(p.numel() for p in model.parameters()), args.step))
@@ -604,7 +776,7 @@ if __name__ == '__main__':
         with open(csv_path, 'w') as f:
           csv_writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
           csv_writer.writeheader()
-        train_and_evaluate(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, args, csv_path)
+        final_step_results = train_and_evaluate(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, args, csv_path)
 
     if args.evaluate_single_model:
         eval_metrics = evaluate_single_model(model, valid_dataloader, loss_fn, args)
@@ -638,4 +810,21 @@ if __name__ == '__main__':
         for f in filenames:
             plot_roc(load_json(os.path.join(args.output_dir, f)), args, 'roc_pr_' + f.split('.')[0])
 
+  # ['exp_dir', 'description', 'final_train_loss',
+  # 'final_auc_0', 'final_auc_1', 'final_auc_2', 'final_auc_3', 'final_auc_4']
+    print('Training complete! Updating experiment log file for {args.output_dir}')
+    with open(experiment_log_file, 'a') as f:
+      row = {
+        'exp_dir': args.output_dir,        
+        'description': args.descr,
+        'final_train_loss':  final_step_results.train_loss,
+        'final_auc_0': final_step_results.auc_0,
+        'final_auc_1': final_step_results.auc_1,
+        'final_auc_2': final_step_results.auc_2,
+        'final_auc_3': final_step_results.auc_3,
+        'final_auc_4': final_step_results.auc_4,
+
+      }
+      csv.DictWriter(f, fieldnames=EXPERIMENT_LOG_COLS).writerow(row)
+      
     writer.close()

@@ -16,6 +16,9 @@ from torch.utils.data import Dataset
 
 random.seed(1216)
 
+LABEL_NAMES = ['Atelectasis', 'Cardiomegaly', 'Consolidation', 'Edema', 'Pleural Effusion']
+U_ONES_NAMES = ['Atelectasis', 'Edema', 'Pleural Effusion']
+
 class ChexpertSmall(Dataset):
     url = 'http://download.cs.stanford.edu/deep/CheXpert-v1.0-small.zip'
     dir_name = os.path.splitext(os.path.basename(url))[0]  # folder to match the filename
@@ -25,13 +28,16 @@ class ChexpertSmall(Dataset):
                       'Atelectasis', 'Pneumothorax', 'Pleural Effusion', 'Pleural Other',
                       'Fracture', 'Support Devices']
     # select only the competition labels
-    attr_names = ['Atelectasis', 'Cardiomegaly', 'Consolidation', 'Edema', 'Pleural Effusion']
+    attr_names = LABEL_NAMES
+    u_ones_names = U_ONES_NAMES
 
-    def __init__(self, root, mode='train', transform=None, data_filter=None, mini_data=None):
+    def __init__(self, root, mode='train', transform=None, data_filter=None, mini_data=None,
+      three_class=False):
         self.root = os.path.expanduser(root)
         self.transform = transform
         assert mode in ['train', 'valid', 'test', 'vis', 'train_debug']
         self.mode = mode
+        self.three_class = three_class
         
         missing_images_path = os.path.join(self.root, f'{mode}_missing_images.csv')
         with open(missing_images_path, 'w') as f:
@@ -80,7 +86,8 @@ class ChexpertSmall(Dataset):
 
         # store index of the selected attributes in the columns of the data for faster indexing
         self.attr_idxs = [self.data.columns.tolist().index(a) for a in self.attr_names]
-        print(f'!! Dataset has {len(self.data)} examples')    
+        self.u_ones_idxs = [self.data.columns.tolist().index(a) for a in self.u_ones_names]
+        print(f'!! Dataset for mode {mode} has {len(self.data)} examples')    
 
     def __getitem__(self, idx):
         # 1. select and load image
@@ -173,7 +180,16 @@ class ChexpertSmall(Dataset):
         train_df[self.attr_names] = train_df[self.attr_names].fillna(0)
 
         # 2. fill -1 as 1 (U-Ones method described in paper)  # TODO -- setup options for uncertain labels
-        train_df[self.attr_names] = train_df[self.attr_names].replace(-1,1)
+        if self.three_class:
+          for u_one_col in self.u_ones_names:
+            train_df.loc[(train_df[u_one_col] == -1), u_one_col] = 1
+          # Uncertain class will have value `2.`
+          train_df[self.attr_names] = train_df[self.attr_names].replace(-1,2)
+            # For the others, keep 3-class labels
+        else:
+          train_df[self.attr_names] = train_df[self.attr_names].replace(-1,1)
+
+        # For 3-class, keep -1 labels.
 
         if data_filter is not None:
             # 3. apply attr filters
